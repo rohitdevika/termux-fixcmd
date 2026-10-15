@@ -1,71 +1,100 @@
-# Termux fixcmd — command error diagnosis
 
-`fixcmd` runs a command, preserves its output/exit code, identifies common error patterns, and optionally asks an AI model for a diagnosis. It can also propose a repair to a text/code file and only applies it after you type `YES`, creating a backup first.
+#!/usr/bin/env python3
+import sys
+import subprocess
+import re
+import shutil
+from pathlib import Path
 
-## Important behavior
+def diagnose(command, output, code):
+    print("\n========== FIXCMD REPORT ==========")
+    print("Command:", command)
+    print("Exit code:", code)
 
-- It does **not** silently intercept every command you type in Termux. Run commands through `fixcmd -- ...` to diagnose failures.
-- Local diagnostics work without an API key.
-- AI diagnosis and `--repair` require an OpenAI API key and may incur API charges.
-- AI-proposed changes can be wrong. Review the diff and test the file.
-- Never paste API keys into GitHub or commit them to this repository.
+    patterns = [
+        (r"command not found", "Command install nahi hai ya naam galat hai."),
+        (r"permission denied", "Permission ki dikkat hai."),
+        (r"no such file or directory", "File ya path nahi mila."),
+        (r"syntax error|unexpected token", "Script mein syntax error hai."),
+        (r"ModuleNotFoundError|No module named", "Python module missing hai."),
+        (r"IndentationError", "Python indentation galat hai."),
+        (r"Connection refused|timed out", "Server ya network connection fail hai."),
+        (r"No space left on device", "Storage bhar gayi hai."),
+        (r"could not resolve|Name or service not known",
+         "Internet ya DNS ki dikkat hai."),
+    ]
 
-## Install on Termux
+    found = False
+    for pattern, reason in patterns:
+        if re.search(pattern, output, re.I):
+            print("\nPossible reason:", reason)
+            found = True
 
-1. Install requirements:
+    if not found:
+        print("\nExact reason local rules se identify nahi hui.")
 
-   ```bash
-   pkg update
-   pkg install python curl git
-   ```
+    print("\nOriginal error output:")
+    print(output or "(Koi output nahi mila)")
 
-2. Create a GitHub repository named `termux-fixcmd` and upload `fixcmd.py` and `install.sh`.
-3. In `install.sh`, replace `YOUR_GITHUB_USERNAME` with your GitHub username.
-4. In Termux, run:
+    print("\nTip: Python file ke liye python -m py_compile file.py")
+    print("Tip: Bash file ke liye bash -n file.sh")
+    print("===================================\n")
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/termux-fixcmd/main/install.sh -o install.sh
-   bash install.sh
-   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
+def main():
+    args = sys.argv[1:]
 
-   Replace `YOUR_GITHUB_USERNAME` in the URL with your real username.
+    if not args:
+        print("Usage: fixcmd -- command [arguments]")
+        print("Example: fixcmd -- python script.py")
+        print("File check: fixcmd --check script.py")
+        return
 
-## Usage
+    if args[0] == "--check":
+        if len(args) != 2:
+            print("Usage: fixcmd --check file.py")
+            return
+        file = Path(args[1])
+        if not file.is_file():
+            print("File nahi mili:", file)
+            return
+        result = subprocess.run(
+            [sys.executable, "-m", "py_compile", str(file)],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            print("Python syntax theek hai:", file)
+        else:
+            print(result.stderr)
+            diagnose("Python syntax check", result.stderr, result.returncode)
+        return
 
-Diagnose a failing command:
+    if args[0] != "--" or len(args) < 2:
+        print("Usage: fixcmd -- command [arguments]")
+        return
 
-```bash
-fixcmd -- python broken_script.py
-fixcmd -- bash script.sh
-fixcmd -- pkg install package-name
-fixcmd -- git clone https://example.com/repo.git
-```
+    command = args[1:]
+    print("Running:", " ".join(command))
 
-Ask AI to propose a repair to a file:
+    try:
+        result = subprocess.run(command, text=True, capture_output=True)
+    except FileNotFoundError:
+        diagnose(" ".join(command), "command not found", 127)
+        return
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+        return
 
-```bash
-export OPENAI_API_KEY="YOUR_API_KEY"
-fixcmd --repair broken_script.py
-```
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
 
-The tool shows a diff, asks for the exact word `YES`, and saves `broken_script.py.fixcmd.bak` before applying changes. Do not use a key you cannot afford to expose to the local device; unset it when not needed:
+    if result.returncode == 0:
+        print("\n[FIXCMD] Command successful.")
+    else:
+        diagnose(" ".join(command),
+                 result.stdout + "\n" + result.stderr,
+                 result.returncode)
 
-```bash
-unset OPENAI_API_KEY
-```
-
-Optional model override:
-
-```bash
-export FIXCMD_MODEL="gpt-4.1-mini"
-```
-
-## Limitations
-
-- Shell commands can behave differently when run through a wrapper. This implementation uses a shell for the command string; only pass commands you understand.
-- It cannot guarantee a fix for every error, and it does not automatically repair installed packages, remote services, permissions, or network issues.
-- The AI endpoint/model availability may change; see the current OpenAI API documentation.
-- Keep backups and inspect changes before executing repaired code.
-
+if __name__ == "__main__":
+    main()
